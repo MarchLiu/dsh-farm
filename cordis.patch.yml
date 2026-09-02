@@ -1,0 +1,17 @@
+# dsh-farm bundle patch: inserts the plugin row into the profile roster.
+# Installed with: dsh plugin --profile <name> add /Users/mars/jobs/dsh-farm
+#
+# The row is a dual-face plugin by package name: the Node half provides the
+# process supervisor, the /farm HTTP API and the agent tools; the browser half
+# (exports["./client"], declared via dsh.client) renders the sidebar button
+# and the overview drawer.
+#
+# Optional config (override from a later layer, e.g. the profile patch):
+#   - id: farm
+#     config:
+#       dataDir: /abs/path       # default: $DSH_HOME/storages/dsh-farm
+#       ringLines: 5000          # in-memory log lines per service
+#       stopGraceMs: 3000        # SIGTERM -> SIGKILL grace
+- insert:
+    - id: farm
+      name: dsh-farm

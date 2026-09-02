@@ -1,0 +1,37 @@
+{
+  "name": "dsh-farm",
+  "version": "0.1.0",
+  "description": "DSH service farm: register, start, stop, restart and watch long-running project services. Left-sidebar entry + overview drawer (per-workspace groups, live log follow, search, export); farm_status/start/stop/restart/logs/register tools for the agent; optional farm.yaml declaration per workspace.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "services",
+    "supervisor"
+  ],
+  "license": "MIT"
+}
