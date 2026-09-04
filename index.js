@@ -7,7 +7,7 @@
  *  - spawn / stop / restart with a small status machine and auto-restart
  *  - log pipeline: in-memory ring buffer + on-disk append + SSE stream
  *  - HTTP API under /farm for the browser half
- *  - agent tools: farm_status/start/stop/restart/logs/register
+ *  - agent tools: farm_status/start/stop/restart/logs/register/unregister
  *
  * Dependency-free on purpose: the tool registry accepts a plain
  * ToolDefinition, and routes ride ctx.webServer.
@@ -283,14 +283,12 @@ export function apply(ctx, config = {}) {
   const findRecord = (id) => {
     const dyn = dynamic.get(id)
     if (dyn) return dyn
-    for (const rec of dynamic.values()) { /* noop, ids are unique */ }
-    // yaml services are discovered by scanning registered workspaces
+    // yaml services are discovered by scanning registered workspaces.
+    // parseFarmYaml keys them by name, so match on the record's own id.
     const workspaces = new Set([...dynamic.values()].map((r) => r.workspace))
     for (const ws of workspaces) {
-      const yamlSvcs = readYamlServices(ws)
-      if (yamlSvcs[id]) return yamlSvcs[id]
+      for (const rec of Object.values(readYamlServices(ws))) if (rec.id === id) return rec
     }
-    // last resort: any runtime record remembers its own workspace
     return undefined
   }
 
@@ -322,6 +320,32 @@ export function apply(ctx, config = {}) {
       for (const rec of Object.values(readYamlServices(ws))) if (wsFilter(rec)) push(rec)
     }
     return out
+  }
+
+  /**
+   * Unregister a service: stop it if it is running, then drop its registry
+   * row, its runtime state, its log sinks and its log file. farm.yaml
+   * services belong to the file, so they are refused here instead of
+   * silently reappearing on the next list.
+   */
+  const removeService = async (id) => {
+    const rec = findRecord(id)
+    if (!rec) return { ok: false, code: 404, error: `unknown service id ${id}` }
+    if (!dynamic.has(id)) {
+      return { ok: false, code: 400, error: `${rec.name} is declared in ${join(rec.workspace, 'farm.yaml')}; remove it there instead` }
+    }
+    const rt = runtime.get(id)
+    if (rt?.child) await stop(rec)
+    dynamic.delete(id)
+    runtime.delete(id)
+    const sinks = streams.get(id)
+    if (sinks) {
+      for (const res of [...sinks]) { try { res.end() } catch {} }
+      streams.delete(id)
+    }
+    try { unlinkSync(logPath(id)) } catch {}
+    persist()
+    return { ok: true, id, name: rec.name }
   }
 
   // ── HTTP API ──────────────────────────────────────────────────────────────
@@ -384,6 +408,22 @@ export function apply(ctx, config = {}) {
           persist()
           return json(res, 200, { service: rec })
         }
+        // Batch unregister. Sits above the /:id routes on purpose: service
+        // ids are hex digests, so 'batch-delete' can never shadow one.
+        if (parts.length === 3 && parts[2] === 'batch-delete' && req.method === 'POST') {
+          let body
+          try { body = JSON.parse((await readBody(req)) || '{}') } catch { return json(res, 400, { error: 'invalid JSON body' }) }
+          const ids = Array.isArray(body.ids) ? [...new Set(body.ids.filter((x) => typeof x === 'string' && x))] : []
+          if (!ids.length) return json(res, 400, { error: 'ids must be a non-empty array of service ids' })
+          const deleted = []
+          const failed = []
+          for (const target of ids) {
+            const r = await removeService(target)
+            if (r.ok) deleted.push({ id: r.id, name: r.name })
+            else failed.push({ id: target, error: r.error })
+          }
+          return json(res, 200, { ok: failed.length === 0, deleted, failed })
+        }
         const id = parts[2]
         const rec = findRecord(id) || dynamic.get(id)
         if (!rec) return json(res, 404, { error: `unknown service id ${id}` })
@@ -393,11 +433,8 @@ export function apply(ctx, config = {}) {
           return svc ? json(res, 200, { service: svc }) : json(res, 404, { error: `unknown service id ${id}` })
         }
         if (!action && req.method === 'DELETE') {
-          const rt = getRuntime(id)
-          if (rt.child) await stop(rec)
-          dynamic.delete(id)
-          persist()
-          return json(res, 200, { ok: true })
+          const r = await removeService(id)
+          return r.ok ? json(res, 200, { ok: true, id: r.id, name: r.name }) : json(res, r.code || 400, { error: r.error })
         }
         if (action === 'start' && req.method === 'POST') return json(res, 200, await start(rec))
         if (action === 'stop' && req.method === 'POST') return json(res, 200, await stop(rec))
@@ -562,6 +599,38 @@ export function apply(ctx, config = {}) {
       dynamic.set(rec.id, rec)
       persist()
       return `registered ${svcName} (id=${rec.id}). Start it with farm_start.`
+    },
+  })
+
+  ctx.tools.register({
+    name: 'farm_unregister',
+    description: 'Delete one or more dsh-farm services from the registry. Running services are stopped first, and their log file is removed. Services declared in a farm.yaml are owned by that file and cannot be deleted this way.',
+    parameters: {
+      type: 'object',
+      properties: {
+        service: { type: 'string', description: 'Service id or unique service name' },
+        services: { type: 'array', items: { type: 'string' }, description: 'Several service ids or names, deleted in one go' },
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    execute: async (args) => {
+      const wanted = [
+        ...(args?.service ? [args.service] : []),
+        ...(Array.isArray(args?.services) ? args.services : []),
+      ].filter((x) => typeof x === 'string' && x.trim())
+      if (!wanted.length) return 'pass service (one id or name) or services (an array of them)'
+      const known = listServices()
+      const lines = []
+      for (const wantedName of [...new Set(wanted)]) {
+        const svc = known.find((s) => s.id === wantedName || s.name === wantedName)
+        if (!svc) { lines.push(`- ${wantedName}: unknown service`); continue }
+        const r = await removeService(svc.id)
+        lines.push(r.ok ? `- ${svc.name} (${svc.id}): deleted` : `- ${svc.name}: ${r.error}`)
+      }
+      return `farm_unregister:\n${lines.join('\n')}`
     },
   })
 
