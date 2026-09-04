@@ -18,9 +18,15 @@ Restart the DSH web surface afterwards.
   clicking it opens the overview drawer — services grouped by workspace with
   status dots, start/stop/restart buttons, and a log view with live follow
   (SSE), substring search and download/export.
+- **Delete**: 🗑 on a row removes that one service. `☑ select` switches the
+  drawer into multi-select — tick rows (or *select all*), then *delete (n)*
+  opens a confirmation dialog listing the targets; nothing is deleted until
+  you confirm it. `farm.yaml` services are greyed out in both paths: the file
+  owns them, so you remove them by editing it.
 - **Agent tools**: `farm_status` / `farm_start` / `farm_stop` /
   `farm_restart` / `farm_logs(service, tail, search)` /
-  `farm_register(name, workspace, command, ...)`. Say "帮我把 dev server
+  `farm_register(name, workspace, command, ...)` /
+  `farm_unregister(service | services)`. Say "帮我把 dev server
   注册到 farm 并启动" in a session and the agent does the rest.
 - **farm.yaml** (optional, per workspace, commit-friendly):
 
@@ -47,6 +53,10 @@ Restart the DSH web surface afterwards.
   backoff (1s → 16s).
 - Logs: 5000-line in-memory ring per service plus an append-only file under
   `$DSH_HOME/storages/dsh-farm/logs/<id>.log`.
+- Deleting a service stops it first, then drops its registry row, its live log
+  stream and its log file. Ids are derived from `workspace + name`, so this
+  keeps a later re-registration of the same name from inheriting stale logs.
+  Project files are never touched.
 
 ## HTTP API (localhost only, prefix `/farm`)
 
@@ -55,7 +65,8 @@ Restart the DSH web surface afterwards.
 | `GET /farm/services?workspace=` | list (farm.yaml entries merged in) |
 | `POST /farm/services` | register/update a dynamic service |
 | `GET /farm/services/:id` | one service |
-| `DELETE /farm/services/:id` | unregister (stops if running) |
+| `DELETE /farm/services/:id` | unregister one (stops it first; 400 for `farm.yaml` services) |
+| `POST /farm/services/batch-delete` | unregister many — `{ ids: [] }` → `{ ok, deleted, failed }` |
 | `POST /farm/services/:id/start\|stop\|restart` | lifecycle |
 | `GET /farm/services/:id/logs?tail=&search=&export=1` | logs, `export=1` downloads |
 | `GET /farm/services/:id/logs/stream` | SSE live follow |

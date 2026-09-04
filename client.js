@@ -7,8 +7,9 @@
  * UI:
  *  - sidebar.footer.action → 🚜 button with a running-services badge
  *  - shell.overlay         → overview drawer grouped by workspace with
- *                            start/stop/restart, log follow (SSE), search
- *                            and export
+ *                            start/stop/restart, delete, multi-select delete
+ *                            behind a confirm dialog, log follow (SSE),
+ *                            search and export
  *
  * No imports: `require` resolves the platform seed table (react).
  */
@@ -24,6 +25,10 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
     loaded: false,
     error: undefined,
     logView: undefined, // { id, name, lines: [], following, search, es }
+    actionError: undefined, // last failed start/stop/delete, survives a refresh
+    selecting: false,       // multi-select mode in the overview
+    selected: new Set(),    // service ids ticked while selecting
+    confirm: undefined,     // { ids: [], busy, error } — pending delete confirmation
     listeners: new Set(),
     emit() { for (const fn of [...this.listeners]) { try { fn() } catch {} } },
     subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn) },
@@ -41,6 +46,9 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
       store.services = body.services || []
       store.loaded = true
       store.error = undefined
+      const live = new Set(store.services.map((s) => s.id))
+      for (const id of [...store.selected]) if (!live.has(id)) store.selected.delete(id)
+      if (store.logView && !live.has(store.logView.id)) closeLogView()
     } catch (err) {
       store.error = String(err)
     }
@@ -50,6 +58,69 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
   const act = async (svc, action) => {
     await fetch(`/farm/services/${svc.id}/${action}`, { method: 'POST' })
     setTimeout(refresh, 300)
+  }
+
+  const closeLogView = () => {
+    if (store.logView && store.logView.es) { try { store.logView.es.close() } catch {} }
+    store.logView = undefined
+  }
+
+  // farm.yaml services are owned by the file; the server refuses to delete
+  // them, so the UI greys them out instead of offering a doomed button.
+  const isRemovable = (svc) => svc.source !== 'yaml'
+
+  const asJson = async (res) => {
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`)
+    return body
+  }
+
+  // refresh() clears store.error on success, so action failures live in
+  // store.actionError and are set after the list has been reloaded.
+  const deleteOne = async (svc) => {
+    let failure
+    try {
+      await asJson(await fetch(`/farm/services/${svc.id}`, { method: 'DELETE' }))
+      store.selected.delete(svc.id)
+    } catch (err) {
+      failure = `delete ${svc.name}: ${err.message || err}`
+    }
+    await refresh()
+    store.actionError = failure
+    store.emit()
+  }
+
+  const deleteSelected = async () => {
+    const pending = store.confirm
+    if (!pending || pending.busy) return
+    pending.busy = true
+    pending.error = undefined
+    store.emit()
+    let failure
+    try {
+      const body = await asJson(await fetch('/farm/services/batch-delete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ids: pending.ids }),
+      }))
+      for (const entry of body.deleted || []) store.selected.delete(entry.id)
+      const failed = body.failed || []
+      if (failed.length) failure = `${failed.length} service(s) kept — ${failed.map((f) => f.error).join('; ')}`
+      store.confirm = undefined
+      if (store.selected.size === 0) store.selecting = false
+    } catch (err) {
+      pending.busy = false
+      pending.error = String(err.message || err)
+    }
+    await refresh()
+    store.actionError = failure
+    store.emit()
+  }
+
+  const exitSelect = () => {
+    store.selecting = false
+    store.selected.clear()
+    store.confirm = undefined
   }
 
   // ── shared styles (theme variables only) ────────────────────────────────
@@ -85,6 +156,29 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
 .dshfarm-log .dshfarm-stderr{color:var(--dsw-alias-label-danger,#ff453a)}
 .dshfarm-log .dshfarm-meta{opacity:.55}
 .dshfarm-empty{opacity:.55;font-size:12px;text-align:center;padding:24px 0}
+.dshfarm-btn:disabled{opacity:.35;cursor:not-allowed}
+.dshfarm-btn:disabled:hover{background:transparent}
+.dshfarm-btn-danger:not(:disabled){color:var(--dsw-alias-label-danger,#ff453a);border-color:var(--dsw-alias-label-danger,#ff453a55)}
+.dshfarm-btn-danger:not(:disabled):hover{background:var(--dsw-alias-label-danger,#ff453a);color:#fff}
+.dshfarm-selbar{display:flex;align-items:center;gap:8px;padding:8px 14px;font-size:12px;
+  border-bottom:1px solid var(--dsw-alias-border-secondary,#8884);background:var(--dsw-alias-bg-layer-2,#8881)}
+.dshfarm-selcount{flex:1;opacity:.7}
+.dshfarm-check{width:14px;height:14px;flex:none;pointer-events:none;accent-color:var(--dsw-alias-accent-brand,#4c7dff)}
+.dshfarm-svc-pick{cursor:pointer}
+.dshfarm-svc-on{border-color:var(--dsw-alias-accent-brand,#4c7dff);background:var(--dsw-alias-bg-layer-2,#8881)}
+.dshfarm-err{margin:6px 0;padding:6px 8px;border-radius:6px;font-size:11px;line-height:1.5;
+  color:var(--dsw-alias-label-danger,#ff453a);border:1px solid var(--dsw-alias-label-danger,#ff453a55)}
+.dshfarm-mask{position:fixed;inset:0;z-index:10001;background:#0007;
+  display:flex;align-items:center;justify-content:center;pointer-events:auto}
+.dshfarm-modal{width:380px;max-width:90vw;border-radius:10px;padding:16px;
+  background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);
+  border:1px solid var(--dsw-alias-border-secondary,#8884);box-shadow:0 12px 32px #0006}
+.dshfarm-modal-title{font-size:14px;font-weight:600;margin-bottom:6px}
+.dshfarm-modal-text{font-size:12px;opacity:.7;line-height:1.6}
+.dshfarm-modal-list{margin:10px 0 0;max-height:168px;overflow:auto;border-radius:6px;padding:8px;
+  font-family:ui-monospace,SFMono-Regular,monospace;font-size:11px;line-height:1.7;
+  background:var(--dsw-alias-bg-layer-2,#8881)}
+.dshfarm-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
 `
   const styleInjected = { value: false }
   const ensureStyles = () => {
@@ -111,7 +205,12 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
       className: 'dshfarm-badge dshfarm-btn',
       style: { border: 'none', fontSize: wide ? 13 : 16, padding: wide ? '4px 8px' : 6, position: 'relative' },
       title: 'dsh-farm services',
-      onClick: () => { store.open = !store.open; refresh(); store.emit() },
+      onClick: () => {
+        store.open = !store.open
+        if (!store.open) exitSelect()
+        refresh()
+        store.emit()
+      },
     },
       '🚜',
       n > 0 ? React.createElement('span', { className: 'dshfarm-dot' }, String(n)) : null,
@@ -198,19 +297,57 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
     )
   }
 
+  // ── confirm dialog (multi-select delete) ────────────────────────────────
+  const ConfirmDelete = () => {
+    useFarm()
+    const pending = store.confirm
+    if (!pending) return null
+    const targets = store.services.filter((svc) => pending.ids.includes(svc.id))
+    const cancel = () => { if (pending.busy) return; store.confirm = undefined; store.emit() }
+    return React.createElement('div', { className: 'dshfarm-mask', onClick: cancel },
+      React.createElement('div', { className: 'dshfarm-modal', onClick: (e) => e.stopPropagation() },
+        React.createElement('div', { className: 'dshfarm-modal-title' },
+          `Delete ${pending.ids.length} service${pending.ids.length > 1 ? 's' : ''}?`),
+        React.createElement('div', { className: 'dshfarm-modal-text' },
+          'Running services are stopped first. This removes them from the farm registry and deletes their log file — project files are untouched.'),
+        React.createElement('div', { className: 'dshfarm-modal-list' },
+          targets.length
+            ? targets.map((svc) => React.createElement('div', { key: svc.id },
+                `${svc.name}  ·  ${svc.status}`))
+            : React.createElement('div', { style: { opacity: 0.6 } }, '(services already gone)'),
+        ),
+        pending.error
+          ? React.createElement('div', { className: 'dshfarm-err' }, pending.error)
+          : null,
+        React.createElement('div', { className: 'dshfarm-modal-actions' },
+          React.createElement('button', {
+            className: 'dshfarm-btn', disabled: pending.busy, onClick: cancel,
+          }, 'cancel'),
+          React.createElement('button', {
+            className: 'dshfarm-btn dshfarm-btn-danger', disabled: pending.busy, onClick: deleteSelected,
+          }, pending.busy ? 'deleting…' : `delete ${pending.ids.length}`),
+        ),
+      ),
+    )
+  }
+
   // ── overview drawer ─────────────────────────────────────────────────────
   const Overview = () => {
     useFarm()
-    // Esc closes (log panel first, then the drawer); one shared key handler.
+    // Esc closes the innermost layer: confirm dialog, then log panel, then
+    // the drawer; one shared key handler.
     React.useEffect(() => {
       if (!store.open) return
       const onKey = (e) => {
         if (e.key !== 'Escape') return
-        if (store.logView) {
-          if (store.logView.es) store.logView.es.close()
-          store.logView = undefined
+        if (store.confirm) {
+          if (store.confirm.busy) return
+          store.confirm = undefined
+        } else if (store.logView) {
+          closeLogView()
         } else {
           store.open = false
+          exitSelect()
         }
         store.emit()
       }
@@ -219,8 +356,9 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
     }, [store.open])
     if (!store.open) return null
     const closeAll = () => {
-      if (store.logView && store.logView.es) store.logView.es.close()
-      store.logView = undefined
+      if (store.confirm) return // the dialog owns the screen until answered
+      closeLogView()
+      exitSelect()
       store.open = false
       store.emit()
     }
@@ -230,7 +368,25 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
       byWs.get(svc.workspace).push(svc)
     }
     const groups = [...byWs.entries()].sort((a, b) => a[0].localeCompare(b[0]))
-    const close = () => { store.open = false; store.emit() }
+    const close = () => { store.open = false; exitSelect(); store.emit() }
+    const removable = store.services.filter(isRemovable)
+    const allPicked = removable.length > 0 && removable.every((svc) => store.selected.has(svc.id))
+    const toggleSelect = (svc) => {
+      if (!isRemovable(svc)) return
+      if (store.selected.has(svc.id)) store.selected.delete(svc.id)
+      else store.selected.add(svc.id)
+      store.emit()
+    }
+    const toggleAll = () => {
+      if (allPicked) store.selected.clear()
+      else for (const svc of removable) store.selected.add(svc.id)
+      store.emit()
+    }
+    const openLogs = (svc) => {
+      closeLogView()
+      store.logView = { id: svc.id, name: svc.name, lines: [], following: false, es: undefined, search: '' }
+      store.emit()
+    }
     return React.createElement(React.Fragment, null,
       // Invisible click-catcher under the drawer: clicking anywhere outside
       // closes it, and it keeps the click from reaching the UI underneath.
@@ -241,43 +397,91 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
       React.createElement('div', { className: 'dshfarm-drawer', style: { pointerEvents: 'auto' } },
       React.createElement('div', { className: 'dshfarm-head' },
         React.createElement('span', { className: 'dshfarm-title' }, '🚜 dsh-farm · services'),
+        React.createElement('button', {
+          className: 'dshfarm-btn',
+          disabled: !store.selecting && removable.length === 0,
+          title: store.selecting ? 'leave multi-select' : 'select several services to delete',
+          onClick: () => {
+            if (store.selecting) exitSelect()
+            else { store.selecting = true; store.actionError = undefined }
+            store.emit()
+          },
+        }, store.selecting ? 'done' : '☑ select'),
         React.createElement('button', { className: 'dshfarm-btn', onClick: refresh }, '↻ refresh'),
         React.createElement('button', { className: 'dshfarm-btn', onClick: close }, '✕'),
       ),
+      store.selecting
+        ? React.createElement('div', { className: 'dshfarm-selbar' },
+            React.createElement('span', { className: 'dshfarm-selcount' },
+              `${store.selected.size} of ${removable.length} selected`),
+            React.createElement('button', {
+              className: 'dshfarm-btn', disabled: removable.length === 0, onClick: toggleAll,
+            }, allPicked ? 'clear all' : 'select all'),
+            React.createElement('button', {
+              className: 'dshfarm-btn dshfarm-btn-danger',
+              disabled: store.selected.size === 0,
+              onClick: () => { store.confirm = { ids: [...store.selected], busy: false, error: undefined }; store.emit() },
+            }, `delete (${store.selected.size})`),
+          )
+        : null,
       React.createElement('div', { className: 'dshfarm-body' },
         store.error ? React.createElement('div', { className: 'dshfarm-empty' }, `error: ${store.error}`) : null,
+        store.actionError
+          ? React.createElement('div', {
+              className: 'dshfarm-err', title: 'click to dismiss', style: { cursor: 'pointer' },
+              onClick: () => { store.actionError = undefined; store.emit() },
+            }, store.actionError)
+          : null,
         !store.error && groups.length === 0
           ? React.createElement('div', { className: 'dshfarm-empty' },
               store.loaded ? 'no services yet — ask the agent to register one (farm_register) or add a farm.yaml' : 'loading…')
           : null,
         groups.map(([ws, svcs]) => React.createElement('div', { key: ws },
           React.createElement('div', { className: 'dshfarm-ws' }, ws),
-          svcs.map((svc) => React.createElement('div', { className: 'dshfarm-svc', key: svc.id },
-            STATUS_DOT.r(svc),
-            React.createElement('div', { className: 'dshfarm-svc-main' },
-              React.createElement('div', { className: 'dshfarm-svc-name' },
-                svc.name,
-                React.createElement('span', { className: 'dshfarm-src' }, svc.source),
-                svc.pid ? React.createElement('span', { style: { fontSize: 10, opacity: 0.6 } }, `pid ${svc.pid}`) : null,
+          svcs.map((svc) => {
+            const canRemove = isRemovable(svc)
+            const picked = store.selected.has(svc.id)
+            const yamlHint = 'declared in farm.yaml — edit the file to remove it'
+            return React.createElement('div', {
+              key: svc.id,
+              className: `dshfarm-svc${store.selecting && canRemove ? ' dshfarm-svc-pick' : ''}${picked ? ' dshfarm-svc-on' : ''}`,
+              onClick: store.selecting ? () => toggleSelect(svc) : undefined,
+              title: store.selecting && !canRemove ? yamlHint : undefined,
+            },
+              store.selecting
+                ? React.createElement('input', {
+                    type: 'checkbox', className: 'dshfarm-check',
+                    checked: picked, disabled: !canRemove, readOnly: true,
+                  })
+                : STATUS_DOT.r(svc),
+              React.createElement('div', { className: 'dshfarm-svc-main' },
+                React.createElement('div', { className: 'dshfarm-svc-name' },
+                  svc.name,
+                  React.createElement('span', { className: 'dshfarm-src' }, svc.source),
+                  svc.pid ? React.createElement('span', { style: { fontSize: 10, opacity: 0.6 } }, `pid ${svc.pid}`) : null,
+                ),
+                React.createElement('div', { className: 'dshfarm-svc-cmd' }, svc.command),
               ),
-              React.createElement('div', { className: 'dshfarm-svc-cmd' }, svc.command),
-            ),
-            React.createElement('button', { className: 'dshfarm-btn', onClick: () => act(svc, 'start') }, 'start'),
-            React.createElement('button', { className: 'dshfarm-btn', onClick: () => act(svc, 'stop') }, 'stop'),
-            React.createElement('button', { className: 'dshfarm-btn', onClick: () => act(svc, 'restart') }, '↻'),
-            React.createElement('button', {
-              className: 'dshfarm-btn',
-              onClick: () => {
-                if (store.logView && store.logView.es) store.logView.es.close()
-                store.logView = { id: svc.id, name: svc.name, lines: [], following: false, es: undefined, search: '' }
-                store.emit()
-              },
-            }, 'logs'),
-          )),
+              store.selecting ? null : [
+                React.createElement('button', { key: 'start', className: 'dshfarm-btn', onClick: () => act(svc, 'start') }, 'start'),
+                React.createElement('button', { key: 'stop', className: 'dshfarm-btn', onClick: () => act(svc, 'stop') }, 'stop'),
+                React.createElement('button', { key: 'restart', className: 'dshfarm-btn', title: 'restart', onClick: () => act(svc, 'restart') }, '↻'),
+                React.createElement('button', { key: 'logs', className: 'dshfarm-btn', onClick: () => openLogs(svc) }, 'logs'),
+                React.createElement('button', {
+                  key: 'delete',
+                  className: 'dshfarm-btn dshfarm-btn-danger',
+                  disabled: !canRemove,
+                  title: canRemove ? `delete ${svc.name}` : yamlHint,
+                  onClick: () => deleteOne(svc),
+                }, '🗑'),
+              ],
+            )
+          }),
         )),
       ),
       store.logView ? React.createElement(LogPanel) : null,
       ),
+      React.createElement(ConfirmDelete),
     )
   }
 
