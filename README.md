@@ -17,7 +17,10 @@ Restart the DSH web surface afterwards.
 - **UI**: a 🚜 button at the sidebar foot with a running-services badge;
   clicking it opens the overview drawer — services grouped by workspace with
   status dots, start/stop/restart buttons, and a log view with live follow
-  (SSE), substring search and download/export.
+  (SSE), substring search and download/export. With
+  [DSH-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar)
+  installed the same panel becomes a **Farm** tab in that sidebar instead —
+  see [Where the UI lives](#where-the-ui-lives).
 - **Delete**: 🗑 on a row removes that one service. `☑ select` switches the
   drawer into multi-select — tick rows (or *select all*), then *delete (n)*
   opens a confirmation dialog listing the targets; nothing is deleted until
@@ -42,6 +45,29 @@ Restart the DSH web surface afterwards.
 
   Declared services appear in the UI and `farm_status` automatically
   (`source: yaml`); the file is always the source of truth.
+
+## Where the UI lives
+
+dsh-farm renders its panel in whichever home is available, decided at runtime:
+
+| DSH-better-sidebar | Where the panel appears |
+|---|---|
+| installed | a **🚜 Farm** tab in better-sidebar (single-instance, with a running-count badge); dsh-farm's own footer button and drawer stand down |
+| not installed | dsh-farm's own 🚜 footer button + right-hand drawer |
+
+Nothing to configure, and better-sidebar is not a dependency — dsh-farm looks
+the service up by name at runtime and keeps working when it is absent. It also
+follows better-sidebar being enabled or disabled while DSH is running, in both
+directions.
+
+> Implementation note for anyone extending this: `betterSidebar` is
+> deliberately **not** in the client half's `inject`. In DSH's cordis a
+> declared-but-missing service parks the whole plugin, which would take the
+> fallback UI down with it — the plugin would vanish entirely rather than fall
+> back. The runtime's optional-lookup hook is `ctx.get('betterSidebar')`
+> (undefined when absent), and `ctx.on('internal/service', …)` catches
+> better-sidebar arriving or leaving later. That event can fire more than once
+> for the same arrival, so registration is idempotent.
 
 ## Behavior notes
 

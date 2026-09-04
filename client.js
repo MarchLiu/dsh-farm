@@ -4,7 +4,12 @@
  * A hand-written module-table bundle: executes by registering its factory with
  * window.__ModuleLoader__; the factory's exports are the client plugin.
  *
- * UI:
+ * UI, in one of two homes:
+ *  - DSH-better-sidebar installed → the panel is registered as a sidebar tab
+ *    through its `betterSidebar` service, and the two slots below render null
+ *  - otherwise → dsh-farm's own footer button + right-hand drawer (below)
+ *
+ * Slots:
  *  - sidebar.footer.action → 🚜 button with a running-services badge
  *  - shell.overlay         → overview drawer grouped by workspace with
  *                            start/stop/restart, delete, multi-select delete
@@ -29,6 +34,7 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
     selecting: false,       // multi-select mode in the overview
     selected: new Set(),    // service ids ticked while selecting
     confirm: undefined,     // { ids: [], busy, error } — pending delete confirmation
+    hosted: false,          // true while DSH-better-sidebar renders the panel
     listeners: new Set(),
     emit() { for (const fn of [...this.listeners]) { try { fn() } catch {} } },
     subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn) },
@@ -138,6 +144,7 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
 .dshfarm-btn{border:1px solid var(--dsw-alias-border-secondary,#8884);background:transparent;
   color:inherit;border-radius:6px;padding:3px 8px;font-size:12px;cursor:pointer}
 .dshfarm-btn:hover{background:var(--dsw-alias-bg-layer-2,#8881)}
+.dshfarm-panel{display:flex;flex-direction:column;flex:1;min-height:0;height:100%}
 .dshfarm-body{flex:1;overflow-y:auto;padding:8px 12px 16px}
 .dshfarm-ws{margin:10px 0 4px;font-size:11px;opacity:.65;word-break:break-all;text-transform:uppercase;letter-spacing:.04em}
 .dshfarm-svc{display:flex;align-items:center;gap:8px;padding:8px;border-radius:8px;
@@ -199,6 +206,9 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
     useFarm()
     ensureStyles()
     React.useEffect(() => { refresh(); const t = setInterval(refresh, 5000); return () => clearInterval(t) }, [])
+    // Hosted, the tab is the way in — but this component stays mounted so the
+    // poll above keeps feeding the tab's badge. Hooks first, then stand down.
+    if (store.hosted) return null
     const n = runningCount()
     const wide = props && props.wide
     return React.createElement('button', {
@@ -331,13 +341,18 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
     )
   }
 
-  // ── overview drawer ─────────────────────────────────────────────────────
-  const Overview = () => {
+  // ── panel: the service list itself, free of any chrome ──────────────────
+  // Rendered by the fallback drawer and, when DSH-better-sidebar is installed,
+  // by our tab inside it. `hosted` decides only whether the panel draws its own
+  // close affordance; everything below the head row is identical either way.
+  const FarmPanel = (props) => {
     useFarm()
-    // Esc closes the innermost layer: confirm dialog, then log panel, then
-    // the drawer; one shared key handler.
+    ensureStyles()
+    const hosted = !!(props && props.hosted)
+    // Esc unwinds the innermost layer: confirm dialog, then log panel, then —
+    // standalone only — the drawer itself. Hosted, there is nothing to close
+    // below the log panel, so Esc just leaves multi-select.
     React.useEffect(() => {
-      if (!store.open) return
       const onKey = (e) => {
         if (e.key !== 'Escape') return
         if (store.confirm) {
@@ -345,23 +360,17 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
           store.confirm = undefined
         } else if (store.logView) {
           closeLogView()
-        } else {
+        } else if (!hosted) {
           store.open = false
           exitSelect()
-        }
+        } else if (store.selecting) {
+          exitSelect()
+        } else return
         store.emit()
       }
       document.addEventListener('keydown', onKey)
       return () => document.removeEventListener('keydown', onKey)
-    }, [store.open])
-    if (!store.open) return null
-    const closeAll = () => {
-      if (store.confirm) return // the dialog owns the screen until answered
-      closeLogView()
-      exitSelect()
-      store.open = false
-      store.emit()
-    }
+    }, [hosted])
     const byWs = new Map()
     for (const svc of store.services) {
       if (!byWs.has(svc.workspace)) byWs.set(svc.workspace, [])
@@ -387,16 +396,9 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
       store.logView = { id: svc.id, name: svc.name, lines: [], following: false, es: undefined, search: '' }
       store.emit()
     }
-    return React.createElement(React.Fragment, null,
-      // Invisible click-catcher under the drawer: clicking anywhere outside
-      // closes it, and it keeps the click from reaching the UI underneath.
-      React.createElement('div', {
-        style: { position: 'fixed', inset: 0, zIndex: 9999, pointerEvents: 'auto' },
-        onClick: closeAll,
-      }),
-      React.createElement('div', { className: 'dshfarm-drawer', style: { pointerEvents: 'auto' } },
+    return React.createElement('div', { className: 'dshfarm-panel' },
       React.createElement('div', { className: 'dshfarm-head' },
-        React.createElement('span', { className: 'dshfarm-title' }, '🚜 dsh-farm · services'),
+        React.createElement('span', { className: 'dshfarm-title' }, hosted ? '🚜 services' : '🚜 dsh-farm · services'),
         React.createElement('button', {
           className: 'dshfarm-btn',
           disabled: !store.selecting && removable.length === 0,
@@ -408,7 +410,7 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
           },
         }, store.selecting ? 'done' : '☑ select'),
         React.createElement('button', { className: 'dshfarm-btn', onClick: refresh }, '↻ refresh'),
-        React.createElement('button', { className: 'dshfarm-btn', onClick: close }, '✕'),
+        hosted ? null : React.createElement('button', { className: 'dshfarm-btn', onClick: close }, '✕'),
       ),
       store.selecting
         ? React.createElement('div', { className: 'dshfarm-selbar' },
@@ -480,7 +482,42 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
         )),
       ),
       store.logView ? React.createElement(LogPanel) : null,
+    )
+  }
+
+  // ── fallback host: dsh-farm's own right-hand drawer ───────────────────
+  const Overview = () => {
+    useFarm()
+    if (store.hosted || !store.open) return null
+    const closeAll = () => {
+      if (store.confirm) return // the dialog owns the screen until answered
+      closeLogView()
+      exitSelect()
+      store.open = false
+      store.emit()
+    }
+    return React.createElement(React.Fragment, null,
+      // Invisible click-catcher under the drawer: clicking anywhere outside
+      // closes it, and it keeps the click from reaching the UI underneath.
+      React.createElement('div', {
+        style: { position: 'fixed', inset: 0, zIndex: 9999, pointerEvents: 'auto' },
+        onClick: closeAll,
+      }),
+      React.createElement('div', { className: 'dshfarm-drawer', style: { pointerEvents: 'auto' } },
+        React.createElement(FarmPanel, { hosted: false }),
       ),
+      React.createElement(ConfirmDelete),
+    )
+  }
+
+  // ── hosted: the page better-sidebar renders inside its own tab ──────────
+  const FarmTab = (props) => {
+    // The footer button keeps the 5s poll alive for the tab badge, so a hidden
+    // tab costs nothing extra; refresh once when it comes back into view.
+    const visible = !props || props.visible !== false
+    React.useEffect(() => { if (visible) refresh() }, [visible])
+    return React.createElement(React.Fragment, null,
+      React.createElement(FarmPanel, { hosted: true }),
       React.createElement(ConfirmDelete),
     )
   }
@@ -498,6 +535,65 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
         { name: 'shell.overlay', id: 'dsh-farm.overview', order: 100, label: 'dsh-farm overview' },
         Overview,
       )), 'dsh-farm: overview drawer')
+
+      // ── optional host: DSH-better-sidebar ─────────────────────────────
+      // `betterSidebar` is deliberately NOT in `inject`. A declared service
+      // that is missing parks the whole plugin, which would take the fallback
+      // UI down with it — the opposite of what we want. ctx.get() is the
+      // runtime's optional-lookup hook: undefined when the plugin is absent.
+      if (typeof ctx.get !== 'function') return   // host predates optional lookup
+
+      let release   // live tab registration, while we have one
+
+      const claim = (bs) => {
+        const tab = {
+          id: 'dsh-farm:services',
+          title: 'Farm',
+          icon: '🚜',
+          order: 60,
+          single: true,
+          component: FarmTab,
+        }
+        // Capability-gated: badges landed in better-sidebar v0.12.0, and the
+        // callback runs on every tab-bar render, so keep it to a count.
+        const features = bs.features ? [...bs.features] : []
+        if (features.includes('badge')) tab.badge = () => runningCount() || null
+        return bs.registerTab(tab)
+      }
+
+      // Both directions are idempotent: `internal/service` can fire more than
+      // once for the same arrival, and a second registerTab would throw.
+      const sync = () => {
+        let bs
+        try { bs = ctx.get('betterSidebar') } catch { bs = undefined }
+        if (bs && !release) {
+          try {
+            release = claim(bs)
+          } catch (err) {
+            release = undefined
+            console.error('[dsh-farm] better-sidebar tab registration failed:', err)
+            return
+          }
+          store.open = false        // the drawer has no reason to stay open
+          store.hosted = true
+          store.emit()
+        } else if (!bs && release) {
+          // The provider unloaded and its registry went with it; drop the
+          // handle rather than calling a disposer into a dead registry.
+          release = undefined
+          store.hosted = false
+          store.emit()
+        }
+      }
+
+      sync()
+      ctx.on('internal/service', (name) => { if (name === 'betterSidebar') sync() })
+      ctx.effect(() => () => {
+        if (!release) return
+        try { release() } catch {}
+        release = undefined
+        store.hosted = false
+      }, 'dsh-farm: release the better-sidebar tab')
     },
   }
 
