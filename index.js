@@ -292,11 +292,22 @@ export function apply(ctx, config = {}) {
     return undefined
   }
 
-  const listServices = (workspace) => {
+  /**
+   * List services, optionally narrowed by workspace (exact path) and by a
+   * case-insensitive `query` matched against the service name, workspace path
+   * and command. Workspace is checked first so `query` can double as a fuzzy
+   * workspace search: searching "jobs" finds every service under a jobs dir.
+   */
+  const listServices = (workspace, query) => {
+    const needle = query ? query.toLowerCase() : ''
+    const matches = (rec) => !needle
+      || rec.name.toLowerCase().includes(needle)
+      || rec.workspace.toLowerCase().includes(needle)
+      || (rec.command || '').toLowerCase().includes(needle)
     const out = []
     const seen = new Set()
     const push = (rec) => {
-      if (seen.has(rec.id)) return
+      if (seen.has(rec.id) || !matches(rec)) return
       seen.add(rec.id)
       const rt = runtime.get(rec.id)
       out.push({
@@ -391,7 +402,9 @@ export function apply(ctx, config = {}) {
       // /farm/services | /farm/services/:id | /farm/services/:id/(start|stop|restart|logs|logs/stream)
       if (parts[1] === 'services') {
         if (parts.length === 2 && req.method === 'GET') {
-          return json(res, 200, { services: listServices(url.searchParams.get('workspace') || undefined) })
+          return json(res, 200, {
+            services: listServices(url.searchParams.get('workspace') || undefined, url.searchParams.get('search') || undefined),
+          })
         }
         if (parts.length === 2 && req.method === 'POST') {
           let body
@@ -485,22 +498,23 @@ export function apply(ctx, config = {}) {
     svc.lastExit ? `  lastExit: code=${svc.lastExit.code} signal=${svc.lastExit.signal ?? 'none'} at=${new Date(svc.lastExit.at).toISOString()}` : '',
   ].filter(Boolean).join('\n')
 
-  const listForTool = (workspace) => listServices(workspace).map(toolView).join('\n') || '(no services registered)'
+  const listForTool = (workspace, query) => listServices(workspace, query).map(toolView).join('\n') || '(no services registered)'
 
   ctx.tools.register({
     name: 'farm_status',
-    description: 'List dsh-farm managed services and their status. Optionally filter by workspace absolute path.',
+    description: 'List dsh-farm managed services and their status. Optionally filter by workspace absolute path and search by a case-insensitive substring matched against service name, workspace or command.',
     parameters: {
       type: 'object',
       properties: {
         workspace: { type: 'string', description: 'Optional workspace absolute path filter' },
+        search: { type: 'string', description: 'Optional case-insensitive substring to match service name, workspace path or command' },
       },
     },
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    execute: async (args) => listForTool(args?.workspace),
+    execute: async (args) => listForTool(args?.workspace, args?.search),
   })
 
   for (const [toolName, action] of [['farm_start', 'start'], ['farm_stop', 'stop'], ['farm_restart', 'restart']]) {

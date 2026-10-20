@@ -30,6 +30,7 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
     loaded: false,
     error: undefined,
     logView: undefined, // { id, name, lines: [], following, search, es }
+    query: '',              // service-list search: matches name / workspace / command
     actionError: undefined, // last failed start/stop/delete, survives a refresh
     selecting: false,       // multi-select mode in the overview
     selected: new Set(),    // service ids ticked while selecting
@@ -372,7 +373,14 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
       return () => document.removeEventListener('keydown', onKey)
     }, [hosted])
     const byWs = new Map()
-    for (const svc of store.services) {
+    const needle = store.query.trim().toLowerCase()
+    const shown = needle
+      ? store.services.filter((svc) =>
+          svc.name.toLowerCase().includes(needle)
+          || svc.workspace.toLowerCase().includes(needle)
+          || (svc.command || '').toLowerCase().includes(needle))
+      : store.services
+    for (const svc of shown) {
       if (!byWs.has(svc.workspace)) byWs.set(svc.workspace, [])
       byWs.get(svc.workspace).push(svc)
     }
@@ -426,6 +434,14 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
             }, `delete (${store.selected.size})`),
           )
         : null,
+      React.createElement('div', { style: { padding: '0 12px' } },
+        React.createElement('input', {
+          className: 'dshfarm-search',
+          placeholder: 'search services by name, workspace or command…',
+          value: store.query,
+          onChange: (e) => { store.query = e.target.value; store.emit() },
+        }),
+      ),
       React.createElement('div', { className: 'dshfarm-body' },
         store.error ? React.createElement('div', { className: 'dshfarm-empty' }, `error: ${store.error}`) : null,
         store.actionError
@@ -436,7 +452,9 @@ window.__ModuleLoader__.load({ id: 'dsh-farm', factory: (require) => {
           : null,
         !store.error && groups.length === 0
           ? React.createElement('div', { className: 'dshfarm-empty' },
-              store.loaded ? 'no services yet — ask the agent to register one (farm_register) or add a farm.yaml' : 'loading…')
+              needle
+                ? `no services matching "${store.query.trim()}"`
+                : store.loaded ? 'no services yet — ask the agent to register one (farm_register) or add a farm.yaml' : 'loading…')
           : null,
         groups.map(([ws, svcs]) => React.createElement('div', { key: ws },
           React.createElement('div', { className: 'dshfarm-ws' }, ws),

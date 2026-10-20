@@ -26,11 +26,16 @@ Restart the DSH web surface afterwards.
   opens a confirmation dialog listing the targets; nothing is deleted until
   you confirm it. `farm.yaml` services are greyed out in both paths: the file
   owns them, so you remove them by editing it.
-- **Agent tools**: `farm_status` / `farm_start` / `farm_stop` /
+- **Agent tools**: `farm_status(workspace?, search?)` / `farm_start` /
+  `farm_stop` /
   `farm_restart` / `farm_logs(service, tail, search)` /
   `farm_register(name, workspace, command, ...)` /
   `farm_unregister(service | services)`. Say "帮我把 dev server
   注册到 farm 并启动" in a session and the agent does the rest.
+  `farm_status` narrows by exact workspace path and/or a case-insensitive
+  `search` substring matched against service name, workspace and command;
+  `GET /farm/services?search=…` supports the same filter for the HTTP API,
+  and the panel has a search box that filters the list live.
 - **farm.yaml** (optional, per workspace, commit-friendly):
 
   ```yaml
