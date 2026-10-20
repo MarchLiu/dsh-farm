@@ -4,6 +4,10 @@
   "packageManager": "pnpm@12.14.0",
   "description": "DSH service farm: register, start, stop, restart and watch long-running project services. Left-sidebar entry + overview drawer (per-workspace groups, live log follow, search, export); farm_status/start/stop/restart/logs/register tools for the agent; optional farm.yaml declaration per workspace.",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MarchLiu/dsh-farm.git"
+  },
   "main": "index.js",
   "exports": {
     ".": "./index.js",
