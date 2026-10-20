@@ -1,6 +1,7 @@
 {
   "name": "dsh-farm",
   "version": "0.2.0",
+  "packageManager": "pnpm@12.14.0",
   "description": "DSH service farm: register, start, stop, restart and watch long-running project services. Left-sidebar entry + overview drawer (per-workspace groups, live log follow, search, export); farm_status/start/stop/restart/logs/register tools for the agent; optional farm.yaml declaration per workspace.",
   "type": "module",
   "main": "index.js",
